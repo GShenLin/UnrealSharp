@@ -357,7 +357,7 @@ bool FCSHotReloadUtilities::ShouldHotReloadOnEditorFocus(const UCSHotReloadSubsy
 		return false;
 	}
 	
-	if (!HotReloadSubsystem->HasPendingHotReloadChanges())
+	if (!HotReloadSubsystem->CanAutomaticallyHotReload())
 	{
 		return false;
 	}

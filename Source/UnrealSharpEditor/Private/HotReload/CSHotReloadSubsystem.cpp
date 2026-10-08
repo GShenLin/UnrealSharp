@@ -16,6 +16,8 @@
 #include "Utilities/CSAssemblyUtilities.h"
 #include "Utilities/CSEditorUtilities.h"
 #include "Widgets/Notifications/SNotificationList.h"
+#include "Framework/Notifications/NotificationManager.h"
+#include "Framework/Docking/TabManager.h"
 
 #define LOCTEXT_NAMESPACE "UCSHotReloadSubsystem"
 
@@ -50,6 +52,7 @@ bool UCSHotReloadSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 
 void UCSHotReloadSubsystem::Deinitialize()
 {
+	ClearFailureNotification(false);
 	Super::Deinitialize();
 	FTSTicker::GetCoreTicker().RemoveTicker(HotReloadTickDelegate);
 }
@@ -127,8 +130,7 @@ void UCSHotReloadSubsystem::PerformHotReload()
 	FString ExceptionMessage;
 	if (!FCSHotReloadUtilities::RecompileDirtyProjects(AssembliesSortedByDependencies, ExceptionMessage))
 	{
-		CurrentHotReloadStatus = FailedToCompile;
-		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(ExceptionMessage), FText::FromString(TEXT("C# Compilation Failed")));
+		ReportHotReloadFailure(LOCTEXT("CompilationFailed", "C# compilation failed. Previous code is still running."), ExceptionMessage);
 		return;
 	}
 	
@@ -167,8 +169,52 @@ void UCSHotReloadSubsystem::PerformHotReload()
 	CurrentHotReloadStatus = Inactive;
 	bDetectedNewManagedType = false;
 	ReloadedTypes.Reset();
+	ClearFailureNotification(true);
 	
 	UE_LOG(LogUnrealSharpEditor, Display, TEXT("C# Hot Reload completed in %.2f seconds."), FPlatformTime::Seconds() - StartTime);
+}
+
+void UCSHotReloadSubsystem::ReportHotReloadFailure(const FText& Summary, const FString& Details)
+{
+	CurrentHotReloadStatus = FailedToCompile;
+	// Log before showing UI, so automation and background editors can diagnose failures.
+	// Keep the loaded assemblies and pending changes; a subsequent save or manual retry can recover.
+	UE_LOG(LogUnrealSharpEditor, Error, TEXT("%s\n%s"), *Summary.ToString(), *Details);
+	if (!FailureNotification.IsValid())
+	{
+		FNotificationInfo Info(Summary);
+		Info.Image = UnrealSharp::Icons::GetUnrealSharpIcon().GetIcon();
+		Info.bFireAndForget = false;
+		Info.ExpireDuration = 3.0f;
+		Info.FadeOutDuration = 0.5f;
+		Info.HyperlinkText = LOCTEXT("OpenHotReloadLog", "Open Output Log");
+		Info.Hyperlink = FSimpleDelegate::CreateLambda([]()
+		{
+			FGlobalTabmanager::Get()->TryInvokeTab(FName(TEXT("OutputLog")));
+		});
+		Info.ButtonDetails.Add(FNotificationButtonInfo(
+			LOCTEXT("DismissHotReloadError", "Dismiss"),
+			LOCTEXT("DismissHotReloadErrorTooltip", "Dismiss this notification. Details remain in Output Log."),
+			FSimpleDelegate::CreateWeakLambda(this, [this]() { ClearFailureNotification(false); })));
+		FailureNotification = FSlateNotificationManager::Get().AddNotification(Info);
+	}
+	if (FailureNotification.IsValid())
+	{
+		FailureNotification->SetText(Summary);
+		FailureNotification->SetCompletionState(SNotificationItem::CS_Fail);
+	}
+}
+
+void UCSHotReloadSubsystem::ClearFailureNotification(bool bSucceeded)
+{
+	if (!FailureNotification.IsValid()) return;
+	if (bSucceeded)
+	{
+		FailureNotification->SetText(LOCTEXT("HotReloadRecovered", "C# hot reload succeeded. Updated code is now active."));
+		FailureNotification->SetCompletionState(SNotificationItem::CS_Success);
+	}
+	FailureNotification->ExpireAndFadeout();
+	FailureNotification.Reset();
 }
 
 void UCSHotReloadSubsystem::OnStructRebuilt(UCSScriptStruct* NewStruct)
@@ -234,7 +280,7 @@ void UCSHotReloadSubsystem::OnStopPlayingPIE(bool IsSimulating)
 	// Replicate UE behavior, which forces a garbage collection when exiting PIE.
 	UnrealSharpEditorModule->GetManagedEditorCallbacks().ForceManagedGC();
 	
-	if (GetDefault<UCSUnrealSharpEditorSettings>()->AutomaticHotReloading != Off)
+	if (GetDefault<UCSUnrealSharpEditorSettings>()->AutomaticHotReloading != Off && CanAutomaticallyHotReload())
 	{
 		PerformHotReload();
 	}
@@ -342,9 +388,11 @@ void UCSHotReloadSubsystem::HandleScriptFileChanges(const TArray<FFileChangeData
 	FString ExceptionMessage;
 	if (!FCSHotReloadUtilities::ApplyDirtiedFiles(ProjectName.ToString(), DirtiedFiles, ExceptionMessage))
 	{
-		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(ExceptionMessage), FText::FromString(TEXT("C# Hot Reload Error")));
+		ReportHotReloadFailure(LOCTEXT("HotReloadFileError", "C# source update failed. Previous code is still running."), ExceptionMessage);
 		return;
 	}
+	// A new successfully applied edit permits automatic retry after a compile failure.
+	CurrentHotReloadStatus = Inactive;
 	
 	UCSManagedAssembly* ModifiedAssembly = UCSManager::Get().FindAssembly(ProjectName);
 	if (!PendingModifiedAssemblies.Contains(ModifiedAssembly))

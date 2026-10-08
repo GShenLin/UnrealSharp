@@ -42,6 +42,7 @@ public:
 
 	UNREALSHARPEDITOR_API bool IsHotReloading() const { return CurrentHotReloadStatus == Active; }
 	UNREALSHARPEDITOR_API bool HasPendingHotReloadChanges() const;
+	bool CanAutomaticallyHotReload() const { return CurrentHotReloadStatus != FailedToCompile && HasPendingHotReloadChanges(); }
 	
 	UNREALSHARPEDITOR_API void PerformHotReload();
 	
@@ -56,6 +57,8 @@ private:
 	void AddDirectoryToWatch(const FString& Directory, FName ProjectName);
 	
 	void HandleScriptFileChanges(const TArray<FFileChangeData>& ChangedFiles, FName ProjectName);
+	void ReportHotReloadFailure(const FText& Summary, const FString& Details);
+	void ClearFailureNotification(bool bSucceeded);
 
 	static void OnHotReloadReady_Callback();
 	void OnHotReloadReady();
@@ -83,6 +86,7 @@ private:
 	FTSTicker::FDelegateHandle HotReloadTickDelegate;
 
 	TSharedPtr<SNotificationItem> PauseNotification;
+	TSharedPtr<SNotificationItem> FailureNotification;
 
 	FUnrealSharpEditorModule* UnrealSharpEditorModule = nullptr;
 
